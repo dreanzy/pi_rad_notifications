@@ -1,9 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
-
-// Mock node:child_process execSync
-vi.mock("node:child_process", () => ({
-	execSync: vi.fn(),
-}));
+import { describe, it, expect } from "vitest";
 
 describe("rad-notifications", () => {
 	it("exports a default extension function", async () => {

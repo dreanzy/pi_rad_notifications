@@ -36,7 +36,7 @@ const LONG_TOOL_THRESHOLD_MS = 120_000;
 
 // ─── 工具执行时间跟踪 ────────────────────────────────────────────────────────
 
-/** 记录每个 tool 的开始时间戳 */
+/** 记录 bash tool 的开始时间戳 */
 const toolStartTimes = new Map<string, number>();
 
 // ─── Windows Toast ───────────────────────────────────────────────────────────
@@ -95,24 +95,24 @@ export default function (pi: ExtensionAPI) {
 			notify("agent_end");
 			return;
 		}
-
 		if (lastMsg.errorMessage) {
-			if (lastMsg.stopReason === "aborted") {
-				notify("agent_aborted");
-			} else {
-				notify("agent_error");
-			}
-		} else {
-			notify("agent_end");
+			notify(
+				lastMsg.stopReason === "aborted" ? "agent_aborted" : "agent_error",
+			);
+			return;
 		}
+		notify("agent_end");
 	});
 
 	// ── tool_execution_start ──────────────────────────────────────────────
 	// 跟踪工具执行时间，给长时间工具准备
 	pi.on("tool_execution_start", async (event) => {
-		toolStartTimes.set(event.toolCallId, Date.now());
-
-		if (event.toolName === "ask_user_question" || event.toolName === "ask") {
+		if (event.toolName === "bash") {
+			toolStartTimes.set(event.toolCallId, Date.now());
+		} else if (
+			event.toolName === "ask_user_question" ||
+			event.toolName === "ask"
+		) {
 			notify("tool_ask");
 		}
 	});
@@ -120,10 +120,11 @@ export default function (pi: ExtensionAPI) {
 	// ── tool_execution_end ────────────────────────────────────────────────
 	// 长时间 bash 执行完成后通知
 	pi.on("tool_execution_end", async (event) => {
+		if (event.toolName !== "bash") return;
 		const startTime = toolStartTimes.get(event.toolCallId);
 		toolStartTimes.delete(event.toolCallId);
 
-		if (startTime && event.toolName === "bash" && !event.isError) {
+		if (startTime && !event.isError) {
 			const elapsed = Date.now() - startTime;
 			if (elapsed >= LONG_TOOL_THRESHOLD_MS) {
 				notify("tool_bash_done");
