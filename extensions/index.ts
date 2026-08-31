@@ -18,7 +18,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { execSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** 当前脚本所在目录（扩展目录） */
@@ -34,6 +34,17 @@ const IS_SUBAGENT = process.env.PI_SUBAGENT_CHILD === "1";
 /** 长时间工具执行的时间阈值（毫秒） */
 const LONG_TOOL_THRESHOLD_MS = 120_000;
 
+/** 工作区名最大长度（超出截断，省略号不计入） */
+const MAX_WS_NAME_LEN = 14;
+
+/** 取工作区名（cwd 最后一段），超长截断加省略号 */
+function workspaceName(cwd: string): string {
+	const name = basename(cwd);
+	return name.length > MAX_WS_NAME_LEN
+		? `${name.slice(0, MAX_WS_NAME_LEN)}...`
+		: name;
+}
+
 // ─── 工具执行时间跟踪 ────────────────────────────────────────────────────────
 
 /** 记录 bash tool 的开始时间戳 */
@@ -41,9 +52,9 @@ const toolStartTimes = new Map<string, number>();
 
 // ─── Windows Toast ───────────────────────────────────────────────────────────
 
-function notifyWindows(event: string, toolName?: string): void {
+function notifyWindows(event: string, wsName: string, toolName?: string): void {
 	try {
-		const args = `-NoProfile -ExecutionPolicy Bypass -File "${PS1_PATH}" -event "${event}"${toolName ? ` -toolName "${toolName}"` : ""}`;
+		const args = `-NoProfile -ExecutionPolicy Bypass -File "${PS1_PATH}" -event "${event}" -workspaceName "${wsName}"${toolName ? ` -toolName "${toolName}"` : ""}`;
 		execSync(`powershell.exe ${args}`, { timeout: 5000, windowsHide: true });
 	} catch {
 		// 非关键功能，静默忽略
@@ -62,21 +73,22 @@ function notifyTerminal(body: string): void {
 
 // ─── 统一通知入口 ────────────────────────────────────────────────────────────
 
-function notify(event: string, toolName?: string): void {
+function notify(cwd: string, event: string, toolName?: string): void {
 	// 子 agent 只保留错误通知，其余静音
 	if (IS_SUBAGENT && event !== "agent_error") return;
 
+	const ws = workspaceName(cwd);
 	if (IS_WINDOWS && existsSync(PS1_PATH)) {
-		notifyWindows(event, toolName);
+		notifyWindows(event, ws, toolName);
 	} else {
 		const map: Record<string, string> = {
-			agent_end: "✅ Pi 处理完成",
-			agent_error: "❌ Pi 处理出错",
-			agent_aborted: "⛔ Pi 被中止",
-			tool_ask: "💬 Pi 正在询问...",
-			tool_bash_done: "⚡ bash 执行完成",
+			agent_end: `✅ 处理完成 [${ws}]`,
+			agent_error: `❌ 处理出错 [${ws}]`,
+			agent_aborted: `⛔ 被中止 [${ws}]`,
+			tool_ask: `💬 正在询问... [${ws}]`,
+			tool_bash_done: `⚡ bash 执行完成 [${ws}]`,
 		};
-		notifyTerminal(map[event] || "⏳ Pi 处理中...");
+		notifyTerminal(map[event] || `⏳ 处理中... [${ws}]`);
 	}
 }
 
@@ -86,40 +98,41 @@ export default function (pi: ExtensionAPI) {
 	// 子 agent 通知过滤已在 notify() 中处理
 
 	// ── agent_end ─────────────────────────────────────────────────────────
-	pi.on("agent_end", async (event: AgentEndEvent) => {
-		const lastMsg = event.messages
-			.filter((m) => m.role === "assistant")
-			.at(-1) as AssistantMessage | undefined;
+	pi.on("agent_end", async (event: AgentEndEvent, ctx) => {
+		const lastMsg = event.messages.filter((m) => m.role === "assistant").at(-1) as
+			| AssistantMessage
+			| undefined;
 
 		if (!lastMsg) {
-			notify("agent_end");
+			notify(ctx.cwd, "agent_end");
 			return;
 		}
 		if (lastMsg.errorMessage) {
 			notify(
+				ctx.cwd,
 				lastMsg.stopReason === "aborted" ? "agent_aborted" : "agent_error",
 			);
 			return;
 		}
-		notify("agent_end");
+		notify(ctx.cwd, "agent_end");
 	});
 
 	// ── tool_execution_start ──────────────────────────────────────────────
 	// 跟踪工具执行时间，给长时间工具准备
-	pi.on("tool_execution_start", async (event) => {
+	pi.on("tool_execution_start", async (event, ctx) => {
 		if (event.toolName === "bash") {
 			toolStartTimes.set(event.toolCallId, Date.now());
 		} else if (
 			event.toolName === "ask_user_question" ||
 			event.toolName === "ask"
 		) {
-			notify("tool_ask");
+			notify(ctx.cwd, "tool_ask");
 		}
 	});
 
 	// ── tool_execution_end ────────────────────────────────────────────────
 	// 长时间 bash 执行完成后通知
-	pi.on("tool_execution_end", async (event) => {
+	pi.on("tool_execution_end", async (event, ctx) => {
 		if (event.toolName !== "bash") return;
 		const startTime = toolStartTimes.get(event.toolCallId);
 		toolStartTimes.delete(event.toolCallId);
@@ -127,7 +140,7 @@ export default function (pi: ExtensionAPI) {
 		if (startTime && !event.isError) {
 			const elapsed = Date.now() - startTime;
 			if (elapsed >= LONG_TOOL_THRESHOLD_MS) {
-				notify("tool_bash_done");
+				notify(ctx.cwd, "tool_bash_done");
 			}
 		}
 	});
